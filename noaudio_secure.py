@@ -7,6 +7,7 @@ import subprocess
 import os
 import sys
 from pathlib import Path
+import tempfile
 
 POSSIBLE_EXTENSIONS = ["avi", "mp4", "mov"]
 
@@ -66,15 +67,31 @@ def remove_audio_from_video(input_path, output_path):
     Remove audio from video file using ffmpeg
     Uses secure subprocess call with list arguments
     """
+    temporary_path = None
     try:
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+        if not input_path.is_file():
+            return False, "Input is not a readable video file"
+        if output_path.exists() or output_path.is_symlink():
+            return False, "Output already exists; it was preserved"
+
+        # Stage beside the destination so publication stays on one filesystem.
+        descriptor, name = tempfile.mkstemp(
+            prefix='.noaudio-', suffix=output_path.suffix, dir=output_path.parent
+        )
+        os.close(descriptor)
+        temporary_path = Path(name)
+
         # Build command as list (prevents command injection)
         command = [
             "ffmpeg",
+            "-nostdin",
             "-i", str(input_path),
             "-c", "copy",
             "-an",
-            str(output_path),
-            "-y"  # Overwrite output file if exists
+            str(temporary_path),
+            "-y"  # Only overwrite this invocation's newly created staging file
         ]
         
         # Execute with shell=False (secure)
@@ -82,10 +99,20 @@ def remove_audio_from_video(input_path, output_path):
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=300  # 5 minute timeout
         )
         
         if result.returncode == 0:
+            if not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+                return False, "FFmpeg did not produce a non-empty video"
+            # Both operations fail if another writer created the destination.
+            # POSIX rename would overwrite it, so use an atomic hard link there.
+            if os.name == 'nt':
+                os.rename(temporary_path, output_path)
+            else:
+                os.link(temporary_path, output_path)
             return True, "Success"
         else:
             return False, f"ffmpeg error: {result.stderr}"
@@ -94,6 +121,12 @@ def remove_audio_from_video(input_path, output_path):
         return False, "Timeout: Video processing took too long"
     except Exception as e:
         return False, f"Error: {str(e)}"
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                print(f"⚠️ Could not remove temporary output: {temporary_path}")
 
 def process_directory(directory):
     """Process all video files in directory"""
@@ -117,7 +150,7 @@ def process_directory(directory):
                 continue
             
             # Skip files that already have "noaudio_" prefix
-            if filename.startswith("noaudio_"):
+            if filename.startswith(("noaudio_", ".noaudio-")):
                 skipped += 1
                 continue
             
@@ -155,6 +188,7 @@ def process_directory(directory):
     print(f"⏭️  Skipped: {skipped}")
     print(f"📁 Total files: {processed + failed + skipped}")
     print()
+    return {"processed": processed, "failed": failed, "skipped": skipped}
 
 def main():
     """Main execution flow"""
@@ -191,7 +225,10 @@ def main():
     
     # Process directory
     try:
-        process_directory(directory)
+        counts = process_directory(directory)
+        if counts["failed"]:
+            print("❌ Some videos failed; completed outputs were preserved.")
+            sys.exit(1)
         print("✅ Done!")
     except KeyboardInterrupt:
         print("\n\n⚠️  Operation interrupted by user")

@@ -1,0 +1,30 @@
+name: Audio removal checks
+
+on:
+  push:
+    branches: [main]
+    paths: ['**.py', '.github/workflows/audio-tests.yml']
+  pull_request:
+    paths: ['**.py', '.github/workflows/audio-tests.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audio-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test with synthetic files and fake FFmpeg results
+        run: python -B -m unittest discover -s tests -v
